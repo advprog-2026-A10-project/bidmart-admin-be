@@ -10,7 +10,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
-use crate::modules::auth::infrastructure::services;
+use crate::modules::auth::domain::errors::AuthError;
+use crate::modules::auth::domain::traits::AuthGatewayPort;
+use crate::modules::auth::infrastructure::repositories::AuthGatewayRepository;
 use crate::modules::auth::infrastructure::AppState;
 
 #[derive(Debug, Clone)]
@@ -89,18 +91,8 @@ pub async fn require_permission(
         }
     }
 
-    let validated =
-        services::validate_with_token(&state.auth_base_url, state.http_timeout_ms, &token)
-            .await
-            .map_err(|error| match error {
-                services::ForwardError::Client(status, message) => {
-                    AuthzError::Message { status, message }
-                }
-                services::ForwardError::Dependency(message) => AuthzError::Message {
-                    status: StatusCode::BAD_GATEWAY,
-                    message,
-                },
-            })?;
+    let gateway = AuthGatewayRepository::new(state.auth_base_url.clone(), state.http_timeout_ms);
+    let validated = gateway.validate(&token).await.map_err(map_auth_error)?;
 
     let context = AdminAuthContext {
         user_id: validated.user_id,
@@ -224,4 +216,22 @@ fn token_cache_key(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn map_auth_error(error: AuthError) -> AuthzError {
+    match error {
+        AuthError::UpstreamClient { status, message } => AuthzError::Message { status, message },
+        AuthError::Dependency(message) => AuthzError::Message {
+            status: StatusCode::BAD_GATEWAY,
+            message,
+        },
+        AuthError::Unauthorized(message) => AuthzError::Message {
+            status: StatusCode::UNAUTHORIZED,
+            message,
+        },
+        AuthError::Forbidden(message) => AuthzError::Message {
+            status: StatusCode::FORBIDDEN,
+            message,
+        },
+    }
 }

@@ -4,7 +4,6 @@ use axum::Router;
 
 pub mod controllers;
 pub mod repositories;
-pub mod services;
 
 pub fn create_router() -> Router<crate::modules::auth::infrastructure::AppState> {
     Router::new()

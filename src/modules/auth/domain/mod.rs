@@ -1,1 +1,3 @@
-// Placeholder for domain layer
+pub mod entities;
+pub mod errors;
+pub mod traits;

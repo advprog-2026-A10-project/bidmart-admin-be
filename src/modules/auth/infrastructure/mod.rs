@@ -8,7 +8,6 @@ use tower_http::cors::CorsLayer;
 pub mod controllers;
 pub mod middleware;
 pub mod repositories;
-pub mod services;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -22,16 +21,6 @@ pub struct AppState {
     pub session_cookie_secure: bool,
     pub session_cookie_same_site: String,
     pub session_cookie_max_age_seconds: i64,
-}
-
-pub fn create_router(state: AppState) -> Router {
-    create_router_with_cors_origins(
-        state,
-        &[
-            "http://localhost:5173".to_string(),
-            "http://127.0.0.1:5173".to_string(),
-        ],
-    )
 }
 
 pub fn create_router_with_cors_origins(state: AppState, allowed_origins: &[String]) -> Router {
