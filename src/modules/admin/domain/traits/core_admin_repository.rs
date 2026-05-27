@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::modules::admin::domain::entities::{
-    Dispute, DisputeResolutionOutcome, ModerationListing,
+    Dispute, DisputeResolutionOutcome, ModerationListing, SystemActivitySnapshot,
 };
 use crate::modules::admin::domain::errors::AdminError;
 
@@ -21,4 +21,5 @@ pub trait CoreAdminRepository: Send + Sync {
         outcome: DisputeResolutionOutcome,
         resolution: &str,
     ) -> Result<Dispute, AdminError>;
+    async fn get_system_activity_snapshot(&self) -> Result<SystemActivitySnapshot, AdminError>;
 }

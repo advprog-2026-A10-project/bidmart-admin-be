@@ -5,7 +5,8 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::modules::admin::domain::entities::{
-    Dispute, DisputeResolutionOutcome, ModerationListing,
+    Dispute, DisputeResolutionOutcome, ModerationListing, SystemActivityEvent, SystemActivityKpi,
+    SystemActivitySnapshot,
 };
 use crate::modules::admin::domain::errors::AdminError;
 use crate::modules::admin::domain::traits::CoreAdminRepository;
@@ -60,6 +61,22 @@ struct DisputeRow {
     order_status: String,
 }
 
+#[derive(Debug, Clone, FromRow)]
+struct SystemActivityKpiRow {
+    active_auctions: i64,
+    bids_last_24h: i64,
+    open_disputes: i64,
+    published_events_last_24h: i64,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct SystemActivityEventRow {
+    kind: String,
+    title: String,
+    detail: String,
+    occurred_at: DateTime<Utc>,
+}
+
 impl From<ModerationListingRow> for ModerationListing {
     fn from(value: ModerationListingRow) -> Self {
         Self {
@@ -101,6 +118,28 @@ impl From<DisputeRow> for Dispute {
             order_image_url: value.order_image_url,
             final_price: value.final_price,
             order_status: value.order_status,
+        }
+    }
+}
+
+impl From<SystemActivityKpiRow> for SystemActivityKpi {
+    fn from(value: SystemActivityKpiRow) -> Self {
+        Self {
+            active_auctions: value.active_auctions,
+            bids_last_24h: value.bids_last_24h,
+            open_disputes: value.open_disputes,
+            published_events_last_24h: value.published_events_last_24h,
+        }
+    }
+}
+
+impl From<SystemActivityEventRow> for SystemActivityEvent {
+    fn from(value: SystemActivityEventRow) -> Self {
+        Self {
+            kind: value.kind,
+            title: value.title,
+            detail: value.detail,
+            occurred_at: value.occurred_at,
         }
     }
 }
@@ -254,6 +293,90 @@ impl CoreAdminRepository for SqlxCoreAdminRepository {
         .map_err(|_| AdminError::Repository("Failed to load dispute detail.".to_string()))?;
 
         Ok(row.map(Dispute::from))
+    }
+
+    async fn get_system_activity_snapshot(&self) -> Result<SystemActivitySnapshot, AdminError> {
+        let kpi_row = sqlx::query_as::<_, SystemActivityKpiRow>(
+            r#"
+            SELECT
+                (
+                    SELECT COUNT(*)::bigint
+                    FROM auctions a
+                    WHERE a.status IN ('ACTIVE'::auction_status, 'EXTENDED'::auction_status)
+                ) AS active_auctions,
+                (
+                    SELECT COUNT(*)::bigint
+                    FROM bids b
+                    WHERE b.created_at >= NOW() - INTERVAL '24 hours'
+                ) AS bids_last_24h,
+                (
+                    SELECT COUNT(*)::bigint
+                    FROM disputes d
+                    WHERE d.status IN ('OPEN'::dispute_status, 'UNDER_REVIEW'::dispute_status)
+                ) AS open_disputes,
+                (
+                    SELECT COUNT(*)::bigint
+                    FROM notifications n
+                    WHERE n.created_at >= NOW() - INTERVAL '24 hours'
+                      AND n.type::text IN ('BID_PLACED', 'WINNER_DETERMINED', 'ORDER_UPDATE', 'SYSTEM')
+                ) AS published_events_last_24h
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load activity KPI.".to_string()))?;
+
+        let event_rows = sqlx::query_as::<_, SystemActivityEventRow>(
+            r#"
+            SELECT
+                events.kind,
+                events.title,
+                events.detail,
+                events.occurred_at
+            FROM (
+                SELECT
+                    'BID'::text AS kind,
+                    COALESCE(a.title, 'Auction Bid') AS title,
+                    CONCAT('Bid ', b.amount::text, ' by ', b.bidder_name) AS detail,
+                    b.created_at AS occurred_at
+                FROM bids b
+                INNER JOIN auctions a ON a.id = b.auction_id
+
+                UNION ALL
+
+                SELECT
+                    'DISPUTE'::text AS kind,
+                    o.title AS title,
+                    CONCAT('Dispute status: ', d.status::text) AS detail,
+                    d.created_at AS occurred_at
+                FROM disputes d
+                INNER JOIN orders o ON o.id = d.order_id
+
+                UNION ALL
+
+                SELECT
+                    'EVENT'::text AS kind,
+                    n.title AS title,
+                    n.message AS detail,
+                    n.created_at AS occurred_at
+                FROM notifications n
+                WHERE n.type::text IN ('BID_PLACED', 'WINNER_DETERMINED', 'ORDER_UPDATE', 'SYSTEM')
+            ) AS events
+            ORDER BY events.occurred_at DESC
+            LIMIT 40
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load activity events.".to_string()))?;
+
+        Ok(SystemActivitySnapshot {
+            kpi: SystemActivityKpi::from(kpi_row),
+            recent_events: event_rows
+                .into_iter()
+                .map(SystemActivityEvent::from)
+                .collect(),
+        })
     }
 
     async fn resolve_dispute(

@@ -66,6 +66,16 @@ pub fn create_router() -> Router<crate::modules::auth::infrastructure::AppState>
             post(controllers::revoke_role_permission).options(cors_preflight),
         )
         .route(
+            "/admin/system/activity",
+            get(controllers::get_system_activity).options(cors_preflight),
+        )
+        .route(
+            "/admin/system/security",
+            get(controllers::get_system_security)
+                .post(controllers::update_system_security_policy)
+                .options(cors_preflight),
+        )
+        .route(
             "/admin/moderation/listings",
             get(controllers::list_moderation_listings).options(cors_preflight),
         )

@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::modules::admin::domain::entities::{
     AdminDashboardSummary, ManagedUser, ManagedUserSession, RbacRole, RbacRoleDetail,
-    RbacRoleMember, RbacUserAssignment,
+    RbacRoleMember, RbacUserAssignment, SecurityLoginAuditEntry, SecurityOverview, SecurityPolicy,
+    SystemSecuritySnapshot,
 };
 use crate::modules::admin::domain::errors::AdminError;
 use crate::modules::admin::domain::traits::AuthAdminRepository;
@@ -83,6 +84,40 @@ struct RbacUserAssignmentRow {
     email: String,
     status: String,
     roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct SecurityPolicyRow {
+    max_concurrent_sessions: i32,
+    enforcement_mode: String,
+    force_mfa_for_admin: bool,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct SecurityOverviewRow {
+    active_sessions: i64,
+    users_with_multiple_sessions: i64,
+    mfa_satisfied_sessions: i64,
+    mfa_unsatisfied_sessions: i64,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct SecurityLoginAuditRow {
+    session_id: Uuid,
+    user_id: Uuid,
+    name: String,
+    email: String,
+    status: String,
+    ip: String,
+    location: String,
+    device: String,
+    browser: String,
+    os: String,
+    mfa_satisfied: bool,
+    created_at: DateTime<Utc>,
+    last_active_at: DateTime<Utc>,
+    expired_at: DateTime<Utc>,
 }
 
 impl From<AdminDashboardSummaryRow> for AdminDashboardSummary {
@@ -162,6 +197,49 @@ impl From<RbacUserAssignmentRow> for RbacUserAssignment {
             email: value.email,
             status: value.status,
             roles: value.roles,
+        }
+    }
+}
+
+impl From<SecurityPolicyRow> for SecurityPolicy {
+    fn from(value: SecurityPolicyRow) -> Self {
+        Self {
+            max_concurrent_sessions: value.max_concurrent_sessions,
+            enforcement_mode: value.enforcement_mode,
+            force_mfa_for_admin: value.force_mfa_for_admin,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<SecurityOverviewRow> for SecurityOverview {
+    fn from(value: SecurityOverviewRow) -> Self {
+        Self {
+            active_sessions: value.active_sessions,
+            users_with_multiple_sessions: value.users_with_multiple_sessions,
+            mfa_satisfied_sessions: value.mfa_satisfied_sessions,
+            mfa_unsatisfied_sessions: value.mfa_unsatisfied_sessions,
+        }
+    }
+}
+
+impl From<SecurityLoginAuditRow> for SecurityLoginAuditEntry {
+    fn from(value: SecurityLoginAuditRow) -> Self {
+        Self {
+            session_id: value.session_id,
+            user_id: value.user_id,
+            name: value.name,
+            email: value.email,
+            status: value.status,
+            ip: value.ip,
+            location: value.location,
+            device: value.device,
+            browser: value.browser,
+            os: value.os,
+            mfa_satisfied: value.mfa_satisfied,
+            created_at: value.created_at,
+            last_active_at: value.last_active_at,
+            expired_at: value.expired_at,
         }
     }
 }
@@ -676,6 +754,116 @@ impl AuthAdminRepository for SqlxAuthAdminRepository {
         ensure_permission_exists(&self.pool, permission).await?;
         Ok(false)
     }
+
+    async fn get_system_security_snapshot(&self) -> Result<SystemSecuritySnapshot, AdminError> {
+        ensure_security_policy_table(&self.pool).await?;
+
+        let policy_row = sqlx::query_as::<_, SecurityPolicyRow>(
+            r#"
+            SELECT
+                max_concurrent_sessions,
+                enforcement_mode,
+                force_mfa_for_admin,
+                updated_at
+            FROM admin_security_policy
+            WHERE id = 1
+            LIMIT 1
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load security policy.".to_string()))?;
+
+        let overview_row = sqlx::query_as::<_, SecurityOverviewRow>(
+            r#"
+            SELECT
+                COUNT(*) FILTER (WHERE s.expired_at > NOW())::bigint AS active_sessions,
+                COUNT(*) FILTER (WHERE active_per_user.active_count > 1)::bigint AS users_with_multiple_sessions,
+                COUNT(*) FILTER (WHERE s.expired_at > NOW() AND s.mfa_satisfied = TRUE)::bigint AS mfa_satisfied_sessions,
+                COUNT(*) FILTER (WHERE s.expired_at > NOW() AND s.mfa_satisfied = FALSE)::bigint AS mfa_unsatisfied_sessions
+            FROM sessions s
+            LEFT JOIN (
+                SELECT user_id, COUNT(*)::bigint AS active_count
+                FROM sessions
+                WHERE expired_at > NOW()
+                GROUP BY user_id
+            ) active_per_user ON active_per_user.user_id = s.user_id
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load security overview.".to_string()))?;
+
+        let audit_rows = sqlx::query_as::<_, SecurityLoginAuditRow>(
+            r#"
+            SELECT
+                s.id AS session_id,
+                u.id AS user_id,
+                COALESCE(
+                    NULLIF(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.last_name, ''))), ''),
+                    split_part(u.email, '@', 1)
+                ) AS name,
+                u.email,
+                u.status::text AS status,
+                s.ip,
+                s.location,
+                s.device,
+                s.browser,
+                s.os,
+                s.mfa_satisfied,
+                s.created_at,
+                s.last_active_at,
+                s.expired_at
+            FROM sessions s
+            INNER JOIN users u ON u.id = s.user_id
+            LEFT JOIN user_profiles p ON p.user_id = u.id
+            ORDER BY s.created_at DESC
+            LIMIT 60
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load login audit.".to_string()))?;
+
+        Ok(SystemSecuritySnapshot {
+            policy: SecurityPolicy::from(policy_row),
+            overview: SecurityOverview::from(overview_row),
+            login_audit: audit_rows
+                .into_iter()
+                .map(SecurityLoginAuditEntry::from)
+                .collect(),
+        })
+    }
+
+    async fn update_security_policy(
+        &self,
+        max_concurrent_sessions: i32,
+        enforcement_mode: &str,
+        force_mfa_for_admin: bool,
+    ) -> Result<SystemSecuritySnapshot, AdminError> {
+        ensure_security_policy_table(&self.pool).await?;
+
+        sqlx::query(
+            r#"
+            UPDATE admin_security_policy
+            SET
+                max_concurrent_sessions = $2,
+                enforcement_mode = $3,
+                force_mfa_for_admin = $4,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+            "#,
+        )
+        .bind(1_i32)
+        .bind(max_concurrent_sessions)
+        .bind(enforcement_mode)
+        .bind(force_mfa_for_admin)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to update security policy.".to_string()))?;
+
+        self.get_system_security_snapshot().await
+    }
 }
 
 async fn ensure_user_exists(pool: &PgPool, user_id: Uuid) -> Result<(), AdminError> {
@@ -742,4 +930,45 @@ async fn ensure_permission_exists(pool: &PgPool, permission: &str) -> Result<(),
     } else {
         Err(AdminError::NotFound("Permission not found.".to_string()))
     }
+}
+
+async fn ensure_security_policy_table(pool: &PgPool) -> Result<(), AdminError> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS admin_security_policy (
+            id INTEGER PRIMARY KEY,
+            max_concurrent_sessions INTEGER NOT NULL DEFAULT 3,
+            enforcement_mode VARCHAR(20) NOT NULL DEFAULT 'REVOKE_OLDEST',
+            force_mfa_for_admin BOOLEAN NOT NULL DEFAULT true,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT chk_admin_security_policy_mode CHECK (
+                enforcement_mode IN ('REJECT_NEW', 'REVOKE_OLDEST')
+            ),
+            CONSTRAINT chk_admin_security_policy_max CHECK (
+                max_concurrent_sessions >= 1
+            )
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|_| AdminError::Repository("Failed to prepare security policy table.".to_string()))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO admin_security_policy (
+            id,
+            max_concurrent_sessions,
+            enforcement_mode,
+            force_mfa_for_admin
+        )
+        VALUES (1, 3, 'REVOKE_OLDEST', TRUE)
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|_| AdminError::Repository("Failed to seed security policy.".to_string()))?;
+
+    Ok(())
 }

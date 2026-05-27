@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::modules::admin::domain::entities::{
     AdminDashboardSummary, ManagedUser, ManagedUserSession, RbacRole, RbacRoleDetail,
-    RbacUserAssignment,
+    RbacUserAssignment, SystemSecuritySnapshot,
 };
 use crate::modules::admin::domain::errors::AdminError;
 
@@ -38,4 +38,11 @@ pub trait AuthAdminRepository: Send + Sync {
         role_name: &str,
         permission: &str,
     ) -> Result<bool, AdminError>;
+    async fn get_system_security_snapshot(&self) -> Result<SystemSecuritySnapshot, AdminError>;
+    async fn update_security_policy(
+        &self,
+        max_concurrent_sessions: i32,
+        enforcement_mode: &str,
+        force_mfa_for_admin: bool,
+    ) -> Result<SystemSecuritySnapshot, AdminError>;
 }
