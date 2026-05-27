@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::modules::admin::application::dto::{ManagedUserDto, ManagedUserSessionDto};
+use crate::modules::admin::application::dto::{
+    ManagedUserDto, ManagedUserSessionDto, SessionActionResultDto,
+};
 use crate::modules::admin::domain::errors::AdminError;
 use crate::modules::admin::domain::traits::AuthAdminRepository;
 
@@ -44,5 +46,45 @@ impl UserManagementUseCase {
             .into_iter()
             .map(ManagedUserSessionDto::from)
             .collect())
+    }
+
+    pub async fn revoke_user_session(
+        &self,
+        user_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<SessionActionResultDto, AdminError> {
+        let user_exists = self.auth_repo.get_managed_user(user_id).await?.is_some();
+        if !user_exists {
+            return Err(AdminError::NotFound("User not found.".to_string()));
+        }
+
+        self.auth_repo
+            .revoke_user_session(user_id, session_id)
+            .await?;
+
+        Ok(SessionActionResultDto {
+            message: "Session revoked.".to_string(),
+            revoked_count: 1,
+        })
+    }
+
+    pub async fn revoke_all_user_sessions(
+        &self,
+        user_id: Uuid,
+    ) -> Result<SessionActionResultDto, AdminError> {
+        let user_exists = self.auth_repo.get_managed_user(user_id).await?.is_some();
+        if !user_exists {
+            return Err(AdminError::NotFound("User not found.".to_string()));
+        }
+
+        let revoked_count = self.auth_repo.revoke_all_user_sessions(user_id).await?;
+        Ok(SessionActionResultDto {
+            message: if revoked_count > 0 {
+                "Active sessions revoked.".to_string()
+            } else {
+                "No active sessions to revoke.".to_string()
+            },
+            revoked_count,
+        })
     }
 }

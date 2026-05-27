@@ -15,4 +15,6 @@ pub trait AuthAdminRepository: Send + Sync {
         &self,
         user_id: Uuid,
     ) -> Result<Vec<ManagedUserSession>, AdminError>;
+    async fn revoke_user_session(&self, user_id: Uuid, session_id: Uuid) -> Result<(), AdminError>;
+    async fn revoke_all_user_sessions(&self, user_id: Uuid) -> Result<u64, AdminError>;
 }

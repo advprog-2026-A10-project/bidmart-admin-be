@@ -28,6 +28,14 @@ pub fn create_router() -> Router<crate::modules::auth::infrastructure::AppState>
             get(controllers::list_user_sessions).options(cors_preflight),
         )
         .route(
+            "/admin/users/:user_id/sessions/:session_id/revoke",
+            post(controllers::revoke_user_session).options(cors_preflight),
+        )
+        .route(
+            "/admin/users/:user_id/sessions/revoke-all",
+            post(controllers::revoke_all_user_sessions).options(cors_preflight),
+        )
+        .route(
             "/admin/moderation/listings",
             get(controllers::list_moderation_listings).options(cors_preflight),
         )

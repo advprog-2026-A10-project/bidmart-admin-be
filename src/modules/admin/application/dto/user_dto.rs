@@ -54,6 +54,13 @@ pub struct ManagedUserSessionDto {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionActionResultDto {
+    pub message: String,
+    pub revoked_count: u64,
+}
+
 impl From<ManagedUserSession> for ManagedUserSessionDto {
     fn from(value: ManagedUserSession) -> Self {
         let status = if value.expired_at > Utc::now() {

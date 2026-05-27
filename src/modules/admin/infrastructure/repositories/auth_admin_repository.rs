@@ -240,4 +240,69 @@ impl AuthAdminRepository for SqlxAuthAdminRepository {
 
         Ok(rows.into_iter().map(ManagedUserSession::from).collect())
     }
+
+    async fn revoke_user_session(&self, user_id: Uuid, session_id: Uuid) -> Result<(), AdminError> {
+        let now = Utc::now();
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE sessions
+            SET expired_at = $3
+            WHERE user_id = $1
+              AND id = $2
+              AND expired_at > $3
+            "#,
+        )
+        .bind(user_id)
+        .bind(session_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to revoke session.".to_string()))?;
+
+        if updated.rows_affected() > 0 {
+            return Ok(());
+        }
+
+        let existing = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM sessions
+                WHERE user_id = $1
+                  AND id = $2
+            )
+            "#,
+        )
+        .bind(user_id)
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to verify session.".to_string()))?;
+
+        if !existing {
+            return Err(AdminError::NotFound("Session not found.".to_string()));
+        }
+
+        Err(AdminError::Conflict("Session already revoked.".to_string()))
+    }
+
+    async fn revoke_all_user_sessions(&self, user_id: Uuid) -> Result<u64, AdminError> {
+        let now = Utc::now();
+        let updated = sqlx::query(
+            r#"
+            UPDATE sessions
+            SET expired_at = $2
+            WHERE user_id = $1
+              AND expired_at > $2
+            "#,
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to revoke sessions.".to_string()))?;
+
+        Ok(updated.rows_affected())
+    }
 }
