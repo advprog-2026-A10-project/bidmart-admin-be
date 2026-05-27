@@ -444,6 +444,103 @@ impl AuthAdminRepository for SqlxAuthAdminRepository {
         Ok(updated.rows_affected())
     }
 
+    async fn suspend_user(&self, user_id: Uuid) -> Result<(bool, u64), AdminError> {
+        let now = Utc::now();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AdminError::Repository("Failed to suspend user.".to_string()))?;
+
+        let status = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT status::text
+            FROM users
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to suspend user.".to_string()))?;
+
+        let Some(status) = status else {
+            tx.rollback().await.ok();
+            return Err(AdminError::NotFound("User not found.".to_string()));
+        };
+
+        let changed = if status == "DISABLED" {
+            false
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE users
+                SET status = 'DISABLED'::user_status, updated_at = $2
+                WHERE id = $1
+                "#,
+            )
+            .bind(user_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| AdminError::Repository("Failed to suspend user.".to_string()))?;
+            true
+        };
+
+        let revoked = sqlx::query(
+            r#"
+            UPDATE sessions
+            SET expired_at = $2
+            WHERE user_id = $1
+              AND expired_at > $2
+            "#,
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to suspend user.".to_string()))?
+        .rows_affected();
+
+        tx.commit()
+            .await
+            .map_err(|_| AdminError::Repository("Failed to suspend user.".to_string()))?;
+
+        Ok((changed, revoked))
+    }
+
+    async fn reactivate_user(&self, user_id: Uuid) -> Result<bool, AdminError> {
+        let now = Utc::now();
+        let changed = sqlx::query(
+            r#"
+            UPDATE users
+            SET
+                status = CASE
+                    WHEN email_verified_at IS NULL THEN 'PENDING_VERIFICATION'::user_status
+                    ELSE 'ACTIVE'::user_status
+                END,
+                updated_at = $2
+            WHERE id = $1
+              AND status = 'DISABLED'::user_status
+            "#,
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to reactivate user.".to_string()))?
+        .rows_affected()
+            > 0;
+
+        if changed {
+            return Ok(true);
+        }
+
+        ensure_user_exists(&self.pool, user_id).await?;
+        Ok(false)
+    }
+
     async fn list_rbac_roles(&self) -> Result<Vec<RbacRole>, AdminError> {
         let rows = sqlx::query_as::<_, RbacRoleRow>(
             r#"

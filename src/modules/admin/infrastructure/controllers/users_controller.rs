@@ -102,6 +102,8 @@ pub async fn revoke_user_session(
         .await
         .map_err(ApiError::from_domain)?;
 
+    let _ = middleware::invalidate_cache_for_user(&state.authz_cache, user_id).await;
+
     Ok(Json(result))
 }
 
@@ -125,6 +127,60 @@ pub async fn revoke_all_user_sessions(
         .revoke_all_user_sessions(user_id)
         .await
         .map_err(ApiError::from_domain)?;
+
+    let _ = middleware::invalidate_cache_for_user(&state.authz_cache, user_id).await;
+
+    Ok(Json(result))
+}
+
+pub async fn suspend_user(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<SessionActionResultDto>, ApiError> {
+    middleware::require_permission(&state, &headers, "user:suspend")
+        .await
+        .map_err(map_authz_error)?;
+
+    let user_id = Uuid::parse_str(&user_id).map_err(|_| ApiError::Message {
+        status: axum::http::StatusCode::BAD_REQUEST,
+        message: "Invalid user id.".to_string(),
+    })?;
+
+    let repository = Arc::new(SqlxAuthAdminRepository::new(state.auth_pool.clone()));
+    let use_case = UserManagementUseCase::new(repository);
+    let result = use_case
+        .suspend_user(user_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+
+    let _ = middleware::invalidate_cache_for_user(&state.authz_cache, user_id).await;
+
+    Ok(Json(result))
+}
+
+pub async fn reactivate_user(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<SessionActionResultDto>, ApiError> {
+    middleware::require_permission(&state, &headers, "user:suspend")
+        .await
+        .map_err(map_authz_error)?;
+
+    let user_id = Uuid::parse_str(&user_id).map_err(|_| ApiError::Message {
+        status: axum::http::StatusCode::BAD_REQUEST,
+        message: "Invalid user id.".to_string(),
+    })?;
+
+    let repository = Arc::new(SqlxAuthAdminRepository::new(state.auth_pool.clone()));
+    let use_case = UserManagementUseCase::new(repository);
+    let result = use_case
+        .reactivate_user(user_id)
+        .await
+        .map_err(ApiError::from_domain)?;
+
+    let _ = middleware::invalidate_cache_for_user(&state.authz_cache, user_id).await;
 
     Ok(Json(result))
 }

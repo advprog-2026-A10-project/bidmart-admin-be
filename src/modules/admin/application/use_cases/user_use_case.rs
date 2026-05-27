@@ -87,4 +87,40 @@ impl UserManagementUseCase {
             revoked_count,
         })
     }
+
+    pub async fn suspend_user(&self, user_id: Uuid) -> Result<SessionActionResultDto, AdminError> {
+        let (changed, revoked_count) = self.auth_repo.suspend_user(user_id).await?;
+
+        let message = if changed {
+            if revoked_count > 0 {
+                "User suspended and active sessions revoked.".to_string()
+            } else {
+                "User suspended. No active sessions found.".to_string()
+            }
+        } else if revoked_count > 0 {
+            "User already suspended. Active sessions revoked.".to_string()
+        } else {
+            "User already suspended.".to_string()
+        };
+
+        Ok(SessionActionResultDto {
+            message,
+            revoked_count,
+        })
+    }
+
+    pub async fn reactivate_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<SessionActionResultDto, AdminError> {
+        let changed = self.auth_repo.reactivate_user(user_id).await?;
+        Ok(SessionActionResultDto {
+            message: if changed {
+                "User reactivated.".to_string()
+            } else {
+                "User is already active.".to_string()
+            },
+            revoked_count: 0,
+        })
+    }
 }

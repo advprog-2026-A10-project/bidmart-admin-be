@@ -18,6 +18,8 @@ pub trait AuthAdminRepository: Send + Sync {
     ) -> Result<Vec<ManagedUserSession>, AdminError>;
     async fn revoke_user_session(&self, user_id: Uuid, session_id: Uuid) -> Result<(), AdminError>;
     async fn revoke_all_user_sessions(&self, user_id: Uuid) -> Result<u64, AdminError>;
+    async fn suspend_user(&self, user_id: Uuid) -> Result<(bool, u64), AdminError>;
+    async fn reactivate_user(&self, user_id: Uuid) -> Result<bool, AdminError>;
     async fn list_rbac_roles(&self) -> Result<Vec<RbacRole>, AdminError>;
     async fn create_rbac_role(&self, role_name: &str) -> Result<RbacRole, AdminError>;
     async fn get_rbac_role_detail(

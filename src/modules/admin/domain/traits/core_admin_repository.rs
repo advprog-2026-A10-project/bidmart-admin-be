@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::modules::admin::domain::entities::{
-    Dispute, DisputeResolutionOutcome, ModerationListing, SystemActivitySnapshot,
+    AdminCategory, Dispute, DisputeResolutionOutcome, ModerationListing, SystemActivitySnapshot,
 };
 use crate::modules::admin::domain::errors::AdminError;
 
@@ -21,5 +21,22 @@ pub trait CoreAdminRepository: Send + Sync {
         outcome: DisputeResolutionOutcome,
         resolution: &str,
     ) -> Result<Dispute, AdminError>;
+    async fn list_categories(&self) -> Result<Vec<AdminCategory>, AdminError>;
+    async fn create_category(
+        &self,
+        name: &str,
+        slug: &str,
+        parent_id: Option<i32>,
+        image_url: Option<String>,
+    ) -> Result<AdminCategory, AdminError>;
+    async fn update_category(
+        &self,
+        category_id: i32,
+        name: &str,
+        slug: &str,
+        parent_id: Option<i32>,
+        image_url: Option<String>,
+    ) -> Result<AdminCategory, AdminError>;
+    async fn delete_category(&self, category_id: i32) -> Result<(), AdminError>;
     async fn get_system_activity_snapshot(&self) -> Result<SystemActivitySnapshot, AdminError>;
 }

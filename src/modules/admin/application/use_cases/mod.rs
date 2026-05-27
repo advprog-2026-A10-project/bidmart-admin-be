@@ -1,3 +1,4 @@
+mod category_use_case;
 mod dashboard_use_case;
 mod dispute_use_case;
 mod moderation_use_case;
@@ -6,6 +7,7 @@ mod system_activity_use_case;
 mod system_security_use_case;
 mod user_use_case;
 
+pub use category_use_case::CategoryUseCase;
 pub use dashboard_use_case::GetDashboardSummaryUseCase;
 pub use dispute_use_case::DisputeUseCase;
 pub use moderation_use_case::ModerationUseCase;

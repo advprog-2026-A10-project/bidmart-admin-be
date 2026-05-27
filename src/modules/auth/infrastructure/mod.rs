@@ -35,7 +35,13 @@ pub fn create_router_with_cors_origins(state: AppState, allowed_origins: &[Strin
     let cors = CorsLayer::new()
         .allow_origin(allowed_origins)
         .allow_credentials(true)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             header::ACCEPT,
             header::AUTHORIZATION,

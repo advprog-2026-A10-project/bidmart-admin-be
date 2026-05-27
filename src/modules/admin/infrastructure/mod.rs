@@ -1,5 +1,5 @@
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::Router;
 
 pub mod controllers;
@@ -34,6 +34,14 @@ pub fn create_router() -> Router<crate::modules::auth::infrastructure::AppState>
         .route(
             "/admin/users/:user_id/sessions/revoke-all",
             post(controllers::revoke_all_user_sessions).options(cors_preflight),
+        )
+        .route(
+            "/admin/users/:user_id/suspend",
+            post(controllers::suspend_user).options(cors_preflight),
+        )
+        .route(
+            "/admin/users/:user_id/reactivate",
+            post(controllers::reactivate_user).options(cors_preflight),
         )
         .route(
             "/admin/rbac/roles",
@@ -94,6 +102,18 @@ pub fn create_router() -> Router<crate::modules::auth::infrastructure::AppState>
         .route(
             "/admin/disputes/:dispute_id/resolve",
             post(controllers::resolve_dispute).options(cors_preflight),
+        )
+        .route(
+            "/admin/categories",
+            get(controllers::list_categories)
+                .post(controllers::create_category)
+                .options(cors_preflight),
+        )
+        .route(
+            "/admin/categories/:category_id",
+            patch(controllers::update_category)
+                .delete(controllers::delete_category)
+                .options(cors_preflight),
         )
 }
 

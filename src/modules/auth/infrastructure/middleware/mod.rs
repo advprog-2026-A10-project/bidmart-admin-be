@@ -8,6 +8,7 @@ use axum::Json;
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use sqlx::postgres::PgPool;
 use tokio::sync::RwLock;
 
 use crate::modules::auth::domain::errors::AuthError;
@@ -86,7 +87,7 @@ pub async fn require_permission(
         cache.get(&cache_key).cloned()
     } {
         if snapshot.expires_at > now {
-            ensure_policy(&snapshot.context, required_permission)?;
+            ensure_policy(state, &snapshot.context, required_permission).await?;
             return Ok(snapshot.context);
         }
     }
@@ -104,7 +105,7 @@ pub async fn require_permission(
         roles: validated.roles,
         permissions: validated.permissions,
     };
-    ensure_policy(&context, required_permission)?;
+    ensure_policy(state, &context, required_permission).await?;
 
     let expires_at = parse_expiry(&context.session_expiry)
         .unwrap_or_else(|| now + Duration::seconds(state.authz_cache_ttl_seconds.max(5)));
@@ -173,7 +174,11 @@ pub async fn invalidate_cache_for_role(cache: &AuthzCache, role_name: &str) -> u
     before.saturating_sub(guard.len())
 }
 
-fn ensure_policy(context: &AdminAuthContext, required_permission: &str) -> Result<(), AuthzError> {
+async fn ensure_policy(
+    state: &AppState,
+    context: &AdminAuthContext,
+    required_permission: &str,
+) -> Result<(), AuthzError> {
     let has_admin_role = context
         .roles
         .iter()
@@ -185,7 +190,8 @@ fn ensure_policy(context: &AdminAuthContext, required_permission: &str) -> Resul
         });
     }
 
-    if !context.mfa_satisfied {
+    let force_mfa_for_admin = resolve_force_mfa_policy(&state.auth_pool).await;
+    if force_mfa_for_admin && !context.mfa_satisfied {
         return Err(AuthzError::Message {
             status: StatusCode::FORBIDDEN,
             message: "Forbidden. MFA must be satisfied.".to_string(),
@@ -204,6 +210,30 @@ fn ensure_policy(context: &AdminAuthContext, required_permission: &str) -> Resul
     }
 
     Ok(())
+}
+
+async fn resolve_force_mfa_policy(pool: &PgPool) -> bool {
+    match sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT force_mfa_for_admin
+        FROM admin_security_policy
+        WHERE id = 1
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => true,
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                "failed to read admin_security_policy, defaulting force_mfa_for_admin=true"
+            );
+            true
+        }
+    }
 }
 
 fn parse_expiry(value: &str) -> Option<DateTime<Utc>> {

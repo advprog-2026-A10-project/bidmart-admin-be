@@ -5,8 +5,8 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::modules::admin::domain::entities::{
-    Dispute, DisputeResolutionOutcome, ModerationListing, SystemActivityEvent, SystemActivityKpi,
-    SystemActivitySnapshot,
+    AdminCategory, Dispute, DisputeResolutionOutcome, ModerationListing, SystemActivityEvent,
+    SystemActivityKpi, SystemActivitySnapshot,
 };
 use crate::modules::admin::domain::errors::AdminError;
 use crate::modules::admin::domain::traits::CoreAdminRepository;
@@ -19,6 +19,18 @@ pub struct SqlxCoreAdminRepository {
 impl SqlxCoreAdminRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+}
+
+fn map_category_write_error(error: sqlx::Error, fallback_message: &str) -> AdminError {
+    match &error {
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+            AdminError::Conflict("Category slug already exists.".to_string())
+        }
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
+            AdminError::InvalidInput("Parent category is invalid.".to_string())
+        }
+        _ => AdminError::Repository(fallback_message.to_string()),
     }
 }
 
@@ -75,6 +87,18 @@ struct SystemActivityEventRow {
     title: String,
     detail: String,
     occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct CategoryRow {
+    id: i32,
+    parent_id: Option<i32>,
+    name: String,
+    slug: String,
+    image_url: Option<String>,
+    child_count: i32,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
 impl From<ModerationListingRow> for ModerationListing {
@@ -140,6 +164,21 @@ impl From<SystemActivityEventRow> for SystemActivityEvent {
             title: value.title,
             detail: value.detail,
             occurred_at: value.occurred_at,
+        }
+    }
+}
+
+impl From<CategoryRow> for AdminCategory {
+    fn from(value: CategoryRow) -> Self {
+        Self {
+            id: value.id,
+            parent_id: value.parent_id,
+            name: value.name,
+            slug: value.slug,
+            image_url: value.image_url,
+            child_count: value.child_count,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
         }
     }
 }
@@ -293,6 +332,334 @@ impl CoreAdminRepository for SqlxCoreAdminRepository {
         .map_err(|_| AdminError::Repository("Failed to load dispute detail.".to_string()))?;
 
         Ok(row.map(Dispute::from))
+    }
+
+    async fn list_categories(&self) -> Result<Vec<AdminCategory>, AdminError> {
+        let rows = sqlx::query_as::<_, CategoryRow>(
+            r#"
+            SELECT
+                id,
+                parent_id,
+                name,
+                slug,
+                image_url,
+                child_count,
+                created_at,
+                updated_at
+            FROM categories
+            ORDER BY parent_id NULLS FIRST, name ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load categories.".to_string()))?;
+
+        Ok(rows.into_iter().map(AdminCategory::from).collect())
+    }
+
+    async fn create_category(
+        &self,
+        name: &str,
+        slug: &str,
+        parent_id: Option<i32>,
+        image_url: Option<String>,
+    ) -> Result<AdminCategory, AdminError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AdminError::Repository("Failed to create category.".to_string()))?;
+
+        if let Some(parent_id) = parent_id {
+            let parent_exists = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM categories
+                    WHERE id = $1
+                )
+                "#,
+            )
+            .bind(parent_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| AdminError::Repository("Failed to create category.".to_string()))?;
+
+            if !parent_exists {
+                tx.rollback().await.ok();
+                return Err(AdminError::InvalidInput(
+                    "Parent category not found.".to_string(),
+                ));
+            }
+        }
+
+        let created = sqlx::query_as::<_, CategoryRow>(
+            r#"
+            INSERT INTO categories (name, slug, parent_id, image_url)
+            VALUES ($1, $2, $3, $4)
+            RETURNING
+                id,
+                parent_id,
+                name,
+                slug,
+                image_url,
+                child_count,
+                created_at,
+                updated_at
+            "#,
+        )
+        .bind(name)
+        .bind(slug)
+        .bind(parent_id)
+        .bind(image_url)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| map_category_write_error(error, "Failed to create category."))?;
+
+        if let Some(parent_id) = parent_id {
+            sqlx::query(
+                r#"
+                UPDATE categories
+                SET child_count = child_count + 1, updated_at = NOW()
+                WHERE id = $1
+                "#,
+            )
+            .bind(parent_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| AdminError::Repository("Failed to create category.".to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|_| AdminError::Repository("Failed to create category.".to_string()))?;
+
+        Ok(AdminCategory::from(created))
+    }
+
+    async fn update_category(
+        &self,
+        category_id: i32,
+        name: &str,
+        slug: &str,
+        parent_id: Option<i32>,
+        image_url: Option<String>,
+    ) -> Result<AdminCategory, AdminError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AdminError::Repository("Failed to update category.".to_string()))?;
+
+        let current = sqlx::query_as::<_, CategoryRow>(
+            r#"
+            SELECT
+                id,
+                parent_id,
+                name,
+                slug,
+                image_url,
+                child_count,
+                created_at,
+                updated_at
+            FROM categories
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(category_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to update category.".to_string()))?
+        .ok_or_else(|| AdminError::NotFound("Category not found.".to_string()))?;
+
+        if parent_id == Some(category_id) {
+            tx.rollback().await.ok();
+            return Err(AdminError::InvalidInput(
+                "Category cannot be its own parent.".to_string(),
+            ));
+        }
+
+        if let Some(parent_id) = parent_id {
+            let parent_exists = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM categories
+                    WHERE id = $1
+                )
+                "#,
+            )
+            .bind(parent_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| AdminError::Repository("Failed to update category.".to_string()))?;
+
+            if !parent_exists {
+                tx.rollback().await.ok();
+                return Err(AdminError::InvalidInput(
+                    "Parent category not found.".to_string(),
+                ));
+            }
+
+            let creates_cycle = sqlx::query_scalar::<_, bool>(
+                r#"
+                WITH RECURSIVE descendants AS (
+                    SELECT id
+                    FROM categories
+                    WHERE parent_id = $1
+
+                    UNION ALL
+
+                    SELECT c.id
+                    FROM categories c
+                    INNER JOIN descendants d ON c.parent_id = d.id
+                )
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM descendants
+                    WHERE id = $2
+                )
+                "#,
+            )
+            .bind(category_id)
+            .bind(parent_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| AdminError::Repository("Failed to update category.".to_string()))?;
+
+            if creates_cycle {
+                tx.rollback().await.ok();
+                return Err(AdminError::Conflict(
+                    "Category parent change would create a cycle.".to_string(),
+                ));
+            }
+        }
+
+        let updated = sqlx::query_as::<_, CategoryRow>(
+            r#"
+            UPDATE categories
+            SET
+                name = $2,
+                slug = $3,
+                parent_id = $4,
+                image_url = $5,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING
+                id,
+                parent_id,
+                name,
+                slug,
+                image_url,
+                child_count,
+                created_at,
+                updated_at
+            "#,
+        )
+        .bind(category_id)
+        .bind(name)
+        .bind(slug)
+        .bind(parent_id)
+        .bind(image_url)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| map_category_write_error(error, "Failed to update category."))?;
+
+        if current.parent_id != updated.parent_id {
+            if let Some(old_parent_id) = current.parent_id {
+                sqlx::query(
+                    r#"
+                    UPDATE categories
+                    SET child_count = GREATEST(child_count - 1, 0), updated_at = NOW()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(old_parent_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| AdminError::Repository("Failed to update category.".to_string()))?;
+            }
+
+            if let Some(new_parent_id) = updated.parent_id {
+                sqlx::query(
+                    r#"
+                    UPDATE categories
+                    SET child_count = child_count + 1, updated_at = NOW()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(new_parent_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| AdminError::Repository("Failed to update category.".to_string()))?;
+            }
+        }
+
+        tx.commit()
+            .await
+            .map_err(|_| AdminError::Repository("Failed to update category.".to_string()))?;
+
+        Ok(AdminCategory::from(updated))
+    }
+
+    async fn delete_category(&self, category_id: i32) -> Result<(), AdminError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AdminError::Repository("Failed to delete category.".to_string()))?;
+
+        let row = sqlx::query_as::<_, (Option<i32>, i32)>(
+            r#"
+            SELECT parent_id, child_count
+            FROM categories
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(category_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to delete category.".to_string()))?;
+
+        let Some((parent_id, child_count)) = row else {
+            tx.rollback().await.ok();
+            return Err(AdminError::NotFound("Category not found.".to_string()));
+        };
+
+        if child_count > 0 {
+            tx.rollback().await.ok();
+            return Err(AdminError::Conflict(
+                "Cannot delete category with children.".to_string(),
+            ));
+        }
+
+        sqlx::query("DELETE FROM categories WHERE id = $1")
+            .bind(category_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| AdminError::Repository("Failed to delete category.".to_string()))?;
+
+        if let Some(parent_id) = parent_id {
+            sqlx::query(
+                r#"
+                UPDATE categories
+                SET child_count = GREATEST(child_count - 1, 0), updated_at = NOW()
+                WHERE id = $1
+                "#,
+            )
+            .bind(parent_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| AdminError::Repository("Failed to delete category.".to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|_| AdminError::Repository("Failed to delete category.".to_string()))?;
+
+        Ok(())
     }
 
     async fn get_system_activity_snapshot(&self) -> Result<SystemActivitySnapshot, AdminError> {
