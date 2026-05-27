@@ -5,7 +5,8 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::modules::admin::domain::entities::{
-    AdminDashboardSummary, ManagedUser, ManagedUserSession,
+    AdminDashboardSummary, ManagedUser, ManagedUserSession, RbacRole, RbacRoleDetail,
+    RbacRoleMember, RbacUserAssignment,
 };
 use crate::modules::admin::domain::errors::AdminError;
 use crate::modules::admin::domain::traits::AuthAdminRepository;
@@ -59,6 +60,31 @@ struct ManagedUserSessionRow {
     expired_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, FromRow)]
+struct RbacRoleRow {
+    id: i32,
+    name: String,
+    permissions: Vec<String>,
+    member_count: i64,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct RbacRoleMemberRow {
+    id: Uuid,
+    name: String,
+    email: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct RbacUserAssignmentRow {
+    id: Uuid,
+    name: String,
+    email: String,
+    status: String,
+    roles: Vec<String>,
+}
+
 impl From<AdminDashboardSummaryRow> for AdminDashboardSummary {
     fn from(value: AdminDashboardSummaryRow) -> Self {
         Self {
@@ -102,6 +128,40 @@ impl From<ManagedUserSessionRow> for ManagedUserSession {
             created_at: value.created_at,
             last_active_at: value.last_active_at,
             expired_at: value.expired_at,
+        }
+    }
+}
+
+impl From<RbacRoleRow> for RbacRole {
+    fn from(value: RbacRoleRow) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            permissions: value.permissions,
+            member_count: value.member_count,
+        }
+    }
+}
+
+impl From<RbacRoleMemberRow> for RbacRoleMember {
+    fn from(value: RbacRoleMemberRow) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            email: value.email,
+            status: value.status,
+        }
+    }
+}
+
+impl From<RbacUserAssignmentRow> for RbacUserAssignment {
+    fn from(value: RbacUserAssignmentRow) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            email: value.email,
+            status: value.status,
+            roles: value.roles,
         }
     }
 }
@@ -304,5 +364,382 @@ impl AuthAdminRepository for SqlxAuthAdminRepository {
         .map_err(|_| AdminError::Repository("Failed to revoke sessions.".to_string()))?;
 
         Ok(updated.rows_affected())
+    }
+
+    async fn list_rbac_roles(&self) -> Result<Vec<RbacRole>, AdminError> {
+        let rows = sqlx::query_as::<_, RbacRoleRow>(
+            r#"
+            SELECT
+                r.id,
+                r.name,
+                COALESCE(
+                    ARRAY_REMOVE(ARRAY_AGG(DISTINCT p.slug), NULL),
+                    ARRAY[]::text[]
+                ) AS permissions,
+                COUNT(DISTINCT ur.user_id)::bigint AS member_count
+            FROM roles r
+            LEFT JOIN role_permissions rp ON rp.role_id = r.id
+            LEFT JOIN permissions p ON p.id = rp.permission_id
+            LEFT JOIN user_roles ur ON ur.role_id = r.id
+            GROUP BY r.id, r.name
+            ORDER BY r.name ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load roles.".to_string()))?;
+
+        Ok(rows.into_iter().map(RbacRole::from).collect())
+    }
+
+    async fn create_rbac_role(&self, role_name: &str) -> Result<RbacRole, AdminError> {
+        let inserted = sqlx::query_scalar::<_, i32>(
+            r#"
+            INSERT INTO roles (name)
+            VALUES ($1)
+            ON CONFLICT (name) DO NOTHING
+            RETURNING id
+            "#,
+        )
+        .bind(role_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to create role.".to_string()))?;
+
+        let Some(role_id) = inserted else {
+            let duplicated = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM roles
+                    WHERE UPPER(name) = UPPER($1)
+                )
+                "#,
+            )
+            .bind(role_name)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|_| AdminError::Repository("Failed to verify role.".to_string()))?;
+
+            if duplicated {
+                return Err(AdminError::Conflict("Role already exists.".to_string()));
+            }
+
+            return Err(AdminError::Repository("Failed to create role.".to_string()));
+        };
+
+        let role = sqlx::query_as::<_, RbacRoleRow>(
+            r#"
+            SELECT
+                r.id,
+                r.name,
+                COALESCE(
+                    ARRAY_REMOVE(ARRAY_AGG(DISTINCT p.slug), NULL),
+                    ARRAY[]::text[]
+                ) AS permissions,
+                COUNT(DISTINCT ur.user_id)::bigint AS member_count
+            FROM roles r
+            LEFT JOIN role_permissions rp ON rp.role_id = r.id
+            LEFT JOIN permissions p ON p.id = rp.permission_id
+            LEFT JOIN user_roles ur ON ur.role_id = r.id
+            WHERE r.id = $1
+            GROUP BY r.id, r.name
+            LIMIT 1
+            "#,
+        )
+        .bind(role_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load created role.".to_string()))?;
+
+        Ok(RbacRole::from(role))
+    }
+
+    async fn get_rbac_role_detail(
+        &self,
+        role_id: i32,
+    ) -> Result<Option<RbacRoleDetail>, AdminError> {
+        let role = sqlx::query_as::<_, RbacRoleRow>(
+            r#"
+            SELECT
+                r.id,
+                r.name,
+                COALESCE(
+                    ARRAY_REMOVE(ARRAY_AGG(DISTINCT p.slug), NULL),
+                    ARRAY[]::text[]
+                ) AS permissions,
+                COUNT(DISTINCT ur.user_id)::bigint AS member_count
+            FROM roles r
+            LEFT JOIN role_permissions rp ON rp.role_id = r.id
+            LEFT JOIN permissions p ON p.id = rp.permission_id
+            LEFT JOIN user_roles ur ON ur.role_id = r.id
+            WHERE r.id = $1
+            GROUP BY r.id, r.name
+            LIMIT 1
+            "#,
+        )
+        .bind(role_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load role detail.".to_string()))?;
+
+        let Some(role) = role else {
+            return Ok(None);
+        };
+
+        let members = sqlx::query_as::<_, RbacRoleMemberRow>(
+            r#"
+            SELECT
+                u.id,
+                COALESCE(
+                    NULLIF(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.last_name, ''))), ''),
+                    split_part(u.email, '@', 1)
+                ) AS name,
+                u.email,
+                u.status::text AS status
+            FROM user_roles ur
+            INNER JOIN users u ON u.id = ur.user_id
+            LEFT JOIN user_profiles p ON p.user_id = u.id
+            WHERE ur.role_id = $1
+            ORDER BY u.created_at DESC
+            "#,
+        )
+        .bind(role_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load role members.".to_string()))?;
+
+        Ok(Some(RbacRoleDetail {
+            id: role.id,
+            name: role.name,
+            permissions: role.permissions,
+            members: members.into_iter().map(RbacRoleMember::from).collect(),
+        }))
+    }
+
+    async fn list_rbac_users(&self) -> Result<Vec<RbacUserAssignment>, AdminError> {
+        let rows = sqlx::query_as::<_, RbacUserAssignmentRow>(
+            r#"
+            SELECT
+                u.id,
+                COALESCE(
+                    NULLIF(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.last_name, ''))), ''),
+                    split_part(u.email, '@', 1)
+                ) AS name,
+                u.email,
+                u.status::text AS status,
+                COALESCE(
+                    ARRAY_REMOVE(ARRAY_AGG(DISTINCT r.name), NULL),
+                    ARRAY[]::text[]
+                ) AS roles
+            FROM users u
+            LEFT JOIN user_profiles p ON p.user_id = u.id
+            LEFT JOIN user_roles ur ON ur.user_id = u.id
+            LEFT JOIN roles r ON r.id = ur.role_id
+            GROUP BY u.id, p.first_name, p.last_name, u.email, u.status, u.created_at
+            ORDER BY u.created_at DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load RBAC users.".to_string()))?;
+
+        Ok(rows.into_iter().map(RbacUserAssignment::from).collect())
+    }
+
+    async fn list_permissions(&self) -> Result<Vec<String>, AdminError> {
+        let rows = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT slug
+            FROM permissions
+            ORDER BY slug ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to load permissions.".to_string()))?;
+
+        Ok(rows)
+    }
+
+    async fn assign_user_role(&self, user_id: Uuid, role_name: &str) -> Result<bool, AdminError> {
+        let inserted = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO user_roles (user_id, role_id)
+            SELECT u.id, r.id
+            FROM users u
+            JOIN roles r ON UPPER(r.name) = UPPER($2)
+            WHERE u.id = $1
+            ON CONFLICT (user_id, role_id) DO NOTHING
+            RETURNING user_id
+            "#,
+        )
+        .bind(user_id)
+        .bind(role_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to assign user role.".to_string()))?;
+
+        if inserted.is_some() {
+            return Ok(true);
+        }
+
+        ensure_user_exists(&self.pool, user_id).await?;
+        ensure_role_exists(&self.pool, role_name).await?;
+        Ok(false)
+    }
+
+    async fn revoke_user_role(&self, user_id: Uuid, role_name: &str) -> Result<bool, AdminError> {
+        let deleted_rows = sqlx::query(
+            r#"
+            DELETE FROM user_roles ur
+            USING roles r
+            WHERE ur.role_id = r.id
+              AND ur.user_id = $1
+              AND UPPER(r.name) = UPPER($2)
+            "#,
+        )
+        .bind(user_id)
+        .bind(role_name)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to revoke user role.".to_string()))?
+        .rows_affected();
+
+        if deleted_rows > 0 {
+            return Ok(true);
+        }
+
+        ensure_user_exists(&self.pool, user_id).await?;
+        ensure_role_exists(&self.pool, role_name).await?;
+        Ok(false)
+    }
+
+    async fn assign_role_permission(
+        &self,
+        role_name: &str,
+        permission: &str,
+    ) -> Result<bool, AdminError> {
+        let inserted = sqlx::query_scalar::<_, i32>(
+            r#"
+            INSERT INTO role_permissions (role_id, permission_id)
+            SELECT r.id, p.id
+            FROM roles r
+            JOIN permissions p ON p.slug = $2
+            WHERE UPPER(r.name) = UPPER($1)
+            ON CONFLICT (role_id, permission_id) DO NOTHING
+            RETURNING role_id
+            "#,
+        )
+        .bind(role_name)
+        .bind(permission)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to assign role permission.".to_string()))?;
+
+        if inserted.is_some() {
+            return Ok(true);
+        }
+
+        ensure_role_exists(&self.pool, role_name).await?;
+        ensure_permission_exists(&self.pool, permission).await?;
+        Ok(false)
+    }
+
+    async fn revoke_role_permission(
+        &self,
+        role_name: &str,
+        permission: &str,
+    ) -> Result<bool, AdminError> {
+        let deleted_rows = sqlx::query(
+            r#"
+            DELETE FROM role_permissions rp
+            USING roles r, permissions p
+            WHERE rp.role_id = r.id
+              AND rp.permission_id = p.id
+              AND UPPER(r.name) = UPPER($1)
+              AND p.slug = $2
+            "#,
+        )
+        .bind(role_name)
+        .bind(permission)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| AdminError::Repository("Failed to revoke role permission.".to_string()))?
+        .rows_affected();
+
+        if deleted_rows > 0 {
+            return Ok(true);
+        }
+
+        ensure_role_exists(&self.pool, role_name).await?;
+        ensure_permission_exists(&self.pool, permission).await?;
+        Ok(false)
+    }
+}
+
+async fn ensure_user_exists(pool: &PgPool, user_id: Uuid) -> Result<(), AdminError> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM users
+            WHERE id = $1
+        )
+        "#,
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| AdminError::Repository("Failed to verify user.".to_string()))?;
+
+    if exists {
+        Ok(())
+    } else {
+        Err(AdminError::NotFound("User not found.".to_string()))
+    }
+}
+
+async fn ensure_role_exists(pool: &PgPool, role_name: &str) -> Result<(), AdminError> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM roles
+            WHERE UPPER(name) = UPPER($1)
+        )
+        "#,
+    )
+    .bind(role_name)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| AdminError::Repository("Failed to verify role.".to_string()))?;
+
+    if exists {
+        Ok(())
+    } else {
+        Err(AdminError::NotFound("Role not found.".to_string()))
+    }
+}
+
+async fn ensure_permission_exists(pool: &PgPool, permission: &str) -> Result<(), AdminError> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM permissions
+            WHERE slug = $1
+        )
+        "#,
+    )
+    .bind(permission)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| AdminError::Repository("Failed to verify permission.".to_string()))?;
+
+    if exists {
+        Ok(())
+    } else {
+        Err(AdminError::NotFound("Permission not found.".to_string()))
     }
 }

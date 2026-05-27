@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::modules::admin::domain::entities::{
-    AdminDashboardSummary, ManagedUser, ManagedUserSession,
+    AdminDashboardSummary, ManagedUser, ManagedUserSession, RbacRole, RbacRoleDetail,
+    RbacUserAssignment,
 };
 use crate::modules::admin::domain::errors::AdminError;
 
@@ -17,4 +18,24 @@ pub trait AuthAdminRepository: Send + Sync {
     ) -> Result<Vec<ManagedUserSession>, AdminError>;
     async fn revoke_user_session(&self, user_id: Uuid, session_id: Uuid) -> Result<(), AdminError>;
     async fn revoke_all_user_sessions(&self, user_id: Uuid) -> Result<u64, AdminError>;
+    async fn list_rbac_roles(&self) -> Result<Vec<RbacRole>, AdminError>;
+    async fn create_rbac_role(&self, role_name: &str) -> Result<RbacRole, AdminError>;
+    async fn get_rbac_role_detail(
+        &self,
+        role_id: i32,
+    ) -> Result<Option<RbacRoleDetail>, AdminError>;
+    async fn list_rbac_users(&self) -> Result<Vec<RbacUserAssignment>, AdminError>;
+    async fn list_permissions(&self) -> Result<Vec<String>, AdminError>;
+    async fn assign_user_role(&self, user_id: Uuid, role_name: &str) -> Result<bool, AdminError>;
+    async fn revoke_user_role(&self, user_id: Uuid, role_name: &str) -> Result<bool, AdminError>;
+    async fn assign_role_permission(
+        &self,
+        role_name: &str,
+        permission: &str,
+    ) -> Result<bool, AdminError>;
+    async fn revoke_role_permission(
+        &self,
+        role_name: &str,
+        permission: &str,
+    ) -> Result<bool, AdminError>;
 }

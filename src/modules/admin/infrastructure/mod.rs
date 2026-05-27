@@ -36,6 +36,36 @@ pub fn create_router() -> Router<crate::modules::auth::infrastructure::AppState>
             post(controllers::revoke_all_user_sessions).options(cors_preflight),
         )
         .route(
+            "/admin/rbac/roles",
+            get(controllers::list_roles)
+                .post(controllers::create_role)
+                .options(cors_preflight),
+        )
+        .route(
+            "/admin/rbac/roles/:role_id",
+            get(controllers::get_role_detail).options(cors_preflight),
+        )
+        .route(
+            "/admin/rbac/permissions",
+            get(controllers::get_permissions_panel).options(cors_preflight),
+        )
+        .route(
+            "/admin/rbac/users/:user_id/roles/assign",
+            post(controllers::assign_user_role).options(cors_preflight),
+        )
+        .route(
+            "/admin/rbac/users/:user_id/roles/revoke",
+            post(controllers::revoke_user_role).options(cors_preflight),
+        )
+        .route(
+            "/admin/rbac/roles/:role_name/permissions/assign",
+            post(controllers::assign_role_permission).options(cors_preflight),
+        )
+        .route(
+            "/admin/rbac/roles/:role_name/permissions/revoke",
+            post(controllers::revoke_role_permission).options(cors_preflight),
+        )
+        .route(
             "/admin/moderation/listings",
             get(controllers::list_moderation_listings).options(cors_preflight),
         )
