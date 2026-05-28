@@ -1,0 +1,5 @@
+mod auth_dto;
+
+pub use auth_dto::{
+    AdminMeResponseDto, LoginCommand, LoginResponseDto, MessageResponseDto, ValidateResponseDto,
+};
