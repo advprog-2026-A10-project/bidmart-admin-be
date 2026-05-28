@@ -5,7 +5,7 @@ edition = "2021"
 description = "BidMart Admin Service - Clean Architecture Axum API"
 
 [dependencies]
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.8", features = ["macros"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 
@@ -43,6 +43,6 @@ external-http-client = ["reqwest"]
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
-axum = "0.7"
+axum = "0.8"
 
 tokio-test = "0.4"
